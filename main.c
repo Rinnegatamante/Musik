@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include "renderer.h"
 
-#define DEBUG_FILE "ux0:data/audio.wav"
+#define DEBUG_FILE "ux0:data/audio.aiff"
 
 #define NSAMPLES  2048 // Samples per read
 #define BUFSIZE   8192 // Audiobuffer size (NSAMPLES<<2)
@@ -11,17 +11,19 @@
 
 static SceUID Audio_Mutex;
 static int volume = 32760, vol_bar = 10, menu_idx = 0;
-static uint8_t audiobuf[BUFSIZE], current_hook;
-static char filename[128];
+static uint8_t current_hook;
+static char filename[64];
 static SceUID hooks[HOOKS_NUM];
 static tai_hook_ref_t refs[HOOKS_NUM];
 static uint8_t menu_mode = 0, loop = 1;
 static char vol_string[64];
 static SceCtrlData pad, oldpad;
+static uint32_t name_timer = 0;
 
 // Supported codecs
 enum {
-	WAV_PCM16
+	WAV_PCM16,
+	AIFF_PCM16
 };
 
 // Opened audio file structure
@@ -30,8 +32,16 @@ typedef struct audioFile{
 	uint8_t codec;
 	uint32_t size;
 	uint16_t audiotype;
-	uint32_t samplerate; // TODO: Check if PORT_TYPE_BGM can be used to avoid software resampling
+	uint32_t samplerate;
 }audioFile;
+
+// Endianess swap functions
+uint32_t Endian_UInt32_Conversion(uint32_t value){
+   return ((value >> 24) & 0x000000FF) | ((value >> 8) & 0x0000FF00) | ((value << 8) & 0x00FF0000) | ((value << 24) & 0xFF000000);
+}
+uint16_t Endian_UInt16_Conversion(uint16_t value){
+   return (uint16_t)(((value >> 8) & 0x00FF) | ((value << 8) & 0xFF00));
+}
 
 // Simplified generic hooking function
 void hookFunction(uint32_t nid, const void *func){
@@ -48,6 +58,7 @@ int audio_thread(SceSize args, void *argp){
 	audioFile song;
 	uint32_t magic, jump, pos, chunk;
 	uint16_t encoding;
+	uint8_t audiobuf[BUFSIZE];
 	
 	// Main loop
 	for (;;){
@@ -56,7 +67,7 @@ int audio_thread(SceSize args, void *argp){
 		sceKernelWaitSema(Audio_Mutex, 1, NULL);
 		
 		// Opening audio file
-		SceUID fd = sceIoOpen(DEBUG_FILE, SCE_O_RDONLY, 0777);
+		SceUID fd = sceIoOpen(filename, SCE_O_RDONLY, 0777);
 		
 		// Parsing magic
 		sceIoRead(fd, &magic, sizeof(uint32_t));
@@ -95,6 +106,42 @@ int audio_thread(SceSize args, void *argp){
 				sceIoLseek(fd, pos+4, SCE_SEEK_SET);
 				
 				break;
+			case 0x4D524F46: // AIF/AIFF
+				song.codec = AIFF_PCM16;
+				
+				// Positioning on chunks section start
+				song.size = sceIoLseek(fd, 0, SCE_SEEK_END); // We'll remove header size later
+				pos = 12;
+				chunk = 0x00000000;
+				sceIoLseek(fd, pos, SCE_SEEK_SET);
+				while (chunk != 0x444E5353){ // data chunk
+					
+					if (chunk == 0x4D4D4F43){ // COMM chunk
+					
+						// Extracting audiotype and samplerate
+						sceIoLseek(fd, pos+8, SCE_SEEK_SET);
+						sceIoRead(fd, &song.audiotype, 2);
+						song.audiotype = song.audiotype>>8;
+						sceIoLseek(fd, pos+18, SCE_SEEK_SET);
+						sceIoRead(fd, &song.samplerate, 4);
+						song.samplerate = Endian_UInt16_Conversion(song.samplerate);
+						
+					}
+					
+					pos += 4;
+					sceIoLseek(fd, pos, SCE_SEEK_SET);
+					sceIoRead(fd, &jump, 4);
+					pos += (4+Endian_UInt32_Conversion(jump));
+					sceIoLseek(fd, pos, SCE_SEEK_SET);
+					sceIoRead(fd, &chunk, 4);
+				}
+				pos += 4;
+				
+				// Removing header size from song size and positioning on data chunk start
+				song.size -= (pos+4);
+				sceIoLseek(fd, pos+4, SCE_SEEK_SET);
+				
+				break;
 			default: // Unknown
 				sceIoClose(fd);
 				fd = 0;
@@ -109,13 +156,26 @@ int audio_thread(SceSize args, void *argp){
 		int cur_volume = volume;
 		
 		// Streaming loop
+		name_timer = 200;
 		song.isPlaying = 1;
+		int i, rbytes;
 		while (song.isPlaying){
 			
 			// Reading next samples
 			switch (song.codec){
 				case WAV_PCM16:
-					int rbytes = sceIoRead(fd, audiobuf, BUFSIZE);
+					rbytes = sceIoRead(fd, audiobuf, BUFSIZE);
+					if (rbytes < BUFSIZE){
+						memset(&audiobuf[rbytes], 0, BUFSIZE - rbytes);
+						song.isPlaying = 0;
+					}
+					break;
+				case AIFF_PCM16:
+					rbytes = sceIoRead(fd, audiobuf, BUFSIZE);
+					for(i=0;i<rbytes;i+=2){
+						uint16_t* sample = (uint16_t*)(&audiobuf[i]);
+						sample[0] = Endian_UInt16_Conversion(sample[0]);
+					}
 					if (rbytes < BUFSIZE){
 						memset(&audiobuf[rbytes], 0, BUFSIZE - rbytes);
 						song.isPlaying = 0;
@@ -143,8 +203,8 @@ int audio_thread(SceSize args, void *argp){
 
 int sceDisplaySetFrameBuf_patched(const SceDisplayFrameBuf *pParam, int sync) {
 	sceCtrlPeekBufferPositive(0, &pad, 1);
+	updateFramebuf(pParam);
 	if (menu_mode){
-		updateFramebuf(pParam);
 		setTextColor(0x00FF00FF);
 		drawString(5, 50, "Musik v.0.1 - CONFIG MENU");
 		drawString(5, 80, "Detected songs: 1");
@@ -174,14 +234,23 @@ int sceDisplaySetFrameBuf_patched(const SceDisplayFrameBuf *pParam, int sync) {
 			vol_string[8 + vol_bar] = '*';
 		}else if(pad.buttons & SCE_CTRL_CROSS){
 			if (menu_idx == 1) loop = (loop + 1) % 2;
-			else if (menu_idx == 2) sceKernelSignalSema(Audio_Mutex, 1);
-			if (menu_idx >= 2){
+			else if (menu_idx == 2){
+				sprintf(filename, DEBUG_FILE);
+				sceKernelSignalSema(Audio_Mutex, 1);
+			}if (menu_idx >= 2){
 				menu_mode = 0;
 				menu_idx = 0;
 			}
 		}
 	}else if ((pad.buttons & SCE_CTRL_SELECT) && (pad.buttons & SCE_CTRL_LTRIGGER) && (pad.buttons & SCE_CTRL_SQUARE)) menu_mode = 1;
 	oldpad.buttons = pad.buttons;
+	
+	if (name_timer > 0){
+		setTextColor(0x00FFFFFF);
+		drawStringF(5, 5, "Now playing %s", filename);
+		name_timer--;
+	}
+	
 	return TAI_CONTINUE(int, refs[0], pParam, sync);
 }
 
