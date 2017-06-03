@@ -81,7 +81,7 @@ long fpos = 0;
 size_t sceIoRead_cb(void* ptr, size_t size, size_t nmemb, void* datasource){
 	size_t rbytes = sceIoRead((SceUID)datasource, ptr, size * nmemb);
 	fpos += rbytes;
-	return rbytes;
+	return rbytes / size;
 }
 long sceIoTell_cb(void* datasource){
 	return fpos;
