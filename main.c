@@ -2,7 +2,7 @@
 #include <libk/stdio.h>
 #include <libk/ctype.h>
 #define _STRING_H_
-#define	_STDIO_H_
+#define _STDIO_H_
 #include <vitasdk.h>
 #include <taihen.h>
 #include <taipool.h>
@@ -46,7 +46,6 @@ static uint8_t menu_mode = 0, loop = 1;
 static char vol_string[64];
 static SceCtrlData pad, oldpad;
 static uint32_t name_timer = 0;
-char* dummy = NULL;
 
 // Supported codecs
 enum {
@@ -275,6 +274,7 @@ int audio_thread(SceSize args, void *argp){
 		switch (song.codec){
 			case OGG_VORBIS:	
 				ov_clear(&vf);
+				ov_clear(&vf); // Seems calling it once doesn't properly clean libtremor decoder
 				break;
 			default:
 				sceIoClose(fd);
@@ -300,7 +300,7 @@ int sceDisplaySetFrameBuf_patched(const SceDisplayFrameBuf *pParam, int sync) {
 		(menu_idx == 2) ? setTextColor(0x0000FF00) : setTextColor(0x00FFFFFF);
 		drawString(5, 140, "Start audio playback");
 		(menu_idx == 3) ? setTextColor(0x0000FF00) : setTextColor(0x00FFFFFF);
-		drawString(5, 160, "Return to the game");
+		drawString(5, 160, "Close config menu");
 		if ((pad.buttons & SCE_CTRL_UP) && (!(oldpad.buttons & SCE_CTRL_UP))){
 			menu_idx--;
 			if (menu_idx < 0) menu_idx++;
@@ -361,7 +361,7 @@ int module_start(SceSize argc, const void *args) {
 	SceUID thd_id = sceKernelCreateThread("Musik_thread", audio_thread, 0x40, 0x400000, 0, 0, NULL);
 	if (thd_id >= 0) sceKernelStartThread(thd_id, 0, NULL);
 	
-	// Initializing taipool mempool for dinamic memory managing
+	// Initializing taipool mempool for dynamic memory managing
 	taipool_init(0x400000);
 	
 	// Hooking functions required for the config menu
