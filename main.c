@@ -1,9 +1,36 @@
+#include <libk/string.h>
+#include <libk/stdio.h>
+#include <libk/ctype.h>
+#define _STRING_H_
+#define	_STDIO_H_
 #include <vitasdk.h>
 #include <taihen.h>
-#include <stdio.h>
+#include <taipool.h>
 #include "renderer.h"
 
-#define DEBUG_FILE "ux0:data/audio.aiff"
+/*
+ * This plugin is compiled with a slightly modified version of
+ * libtremor-lowmem branch. toupper has been replace with
+ * strncasecmp and ov_open / ov_test had been made dummy.
+ * It also has dummy errno feature.
+ */
+
+// strncasecmp implementation for libtremor
+int strncasecmp(const char* s1,const char* s2, size_t n){
+	int c=0;
+	while(c < n){
+		if(tolower(s1[c]) != tolower(s2[c]))
+			return !0;
+		c++;
+	}
+	return 0;
+}
+
+#include <tremor/ogg.h>
+#include <tremor/ivorbiscodec.h>
+#include <tremor/ivorbisfile.h>
+
+#define DEBUG_FILE "ux0:data/audio.ogg"
 
 #define NSAMPLES  2048 // Samples per read
 #define BUFSIZE   8192 // Audiobuffer size (NSAMPLES<<2)
@@ -19,18 +46,19 @@ static uint8_t menu_mode = 0, loop = 1;
 static char vol_string[64];
 static SceCtrlData pad, oldpad;
 static uint32_t name_timer = 0;
+char* dummy = NULL;
 
 // Supported codecs
 enum {
+	OGG_VORBIS,
 	WAV_PCM16,
 	AIFF_PCM16
 };
 
 // Opened audio file structure
 typedef struct audioFile{
-	uint8_t isPlaying;
-	uint8_t codec;
-	uint32_t size;
+	uint8_t  isPlaying;
+	uint8_t  codec;
 	uint16_t audiotype;
 	uint32_t samplerate;
 }audioFile;
@@ -49,16 +77,38 @@ void hookFunction(uint32_t nid, const void *func){
 	current_hook++;
 }
 
+// Custom functions used as libogg callbacks
+long fpos = 0;
+size_t sceIoRead_cb(void* ptr, size_t size, size_t nmemb, void* datasource){
+	size_t rbytes = sceIoRead((SceUID)datasource, ptr, size * nmemb);
+	fpos += rbytes;
+	return rbytes;
+}
+long sceIoTell_cb(void* datasource){
+	return fpos;
+}
+int sceIoClose_cb(void* datasource){
+	fpos = 0;
+	return sceIoClose((SceUID)datasource);
+}
+int sceIoLseek_cb(void* datasource, ogg_int64_t offset, int whence){
+	int res = sceIoLseek((SceUID)datasource, offset, whence);
+	fpos = res;
+	return res;
+}
+
+audioFile song;
+
 // Audio thread
 int audio_thread(SceSize args, void *argp){
 
 	// Opening an audio port
 	int ch = sceAudioOutOpenPort(SCE_AUDIO_OUT_PORT_TYPE_BGM, NSAMPLES, 48000, SCE_AUDIO_OUT_MODE_STEREO);
 	
-	audioFile song;
 	uint32_t magic, jump, pos, chunk;
 	uint16_t encoding;
 	uint8_t audiobuf[BUFSIZE];
+	OggVorbis_File vf;
 	
 	// Main loop
 	for (;;){
@@ -75,7 +125,6 @@ int audio_thread(SceSize args, void *argp){
 			case 0x46464952: // WAV
 				
 				// Checking encoding
-				song.size = sceIoLseek(fd, 0, SCE_SEEK_END); // We'll remove header size later
 				sceIoLseek(fd, 20, SCE_SEEK_SET);
 				sceIoRead(fd, &encoding, 2);
 				if (encoding == 0x01) song.codec = WAV_PCM16; // PCM16
@@ -100,9 +149,6 @@ int audio_thread(SceSize args, void *argp){
 					sceIoRead(fd, &chunk, 4);
 					pos += 4;
 				}
-				
-				// Removing header size from song size and positioning on data chunk start
-				song.size -= (pos+4);
 				sceIoLseek(fd, pos+4, SCE_SEEK_SET);
 				
 				break;
@@ -110,7 +156,6 @@ int audio_thread(SceSize args, void *argp){
 				song.codec = AIFF_PCM16;
 				
 				// Positioning on chunks section start
-				song.size = sceIoLseek(fd, 0, SCE_SEEK_END); // We'll remove header size later
 				pos = 12;
 				chunk = 0x00000000;
 				sceIoLseek(fd, pos, SCE_SEEK_SET);
@@ -137,10 +182,30 @@ int audio_thread(SceSize args, void *argp){
 				}
 				pos += 4;
 				
-				// Removing header size from song size and positioning on data chunk start
-				song.size -= (pos+4);
+				// Positioning on data chunk start
 				sceIoLseek(fd, pos+4, SCE_SEEK_SET);
 				
+				break;
+			case 0x5367674F: // OGG
+				song.codec = OGG_VORBIS;
+				
+				// Setting up custom callbacks in order to use sceIo with libogg
+				ov_callbacks cb;
+				cb.read_func = sceIoRead_cb;
+				cb.seek_func = sceIoLseek_cb;
+				cb.close_func = sceIoClose_cb;
+				cb.tell_func = sceIoTell_cb;
+				
+				// Opening ogg file with libogg
+				sceIoLseek(fd, 0, SEEK_SET);
+				if (ov_open_callbacks((void*)fd, &vf, NULL, 0, cb) != 0){
+					ov_clear(&vf);
+					fd = 0;
+				}else{
+					vorbis_info* ogg_info = ov_info(&vf,-1);
+					song.samplerate = ogg_info->rate;
+					song.audiotype = ogg_info->channels - 1;
+				}
 				break;
 			default: // Unknown
 				sceIoClose(fd);
@@ -158,7 +223,7 @@ int audio_thread(SceSize args, void *argp){
 		// Streaming loop
 		name_timer = 200;
 		song.isPlaying = 1;
-		int i, rbytes;
+		int i=0, z=0, rbytes, sector;
 		while (song.isPlaying){
 			
 			// Reading next samples
@@ -181,6 +246,19 @@ int audio_thread(SceSize args, void *argp){
 						song.isPlaying = 0;
 					}
 					break;
+				case OGG_VORBIS:
+					while (i < BUFSIZE){
+						rbytes = ov_read(&vf, &audiobuf[i], BUFSIZE - i, &sector);
+						if (rbytes == 0){
+							memset(&audiobuf[i], 0, BUFSIZE - i);
+							song.isPlaying = 0;
+							break;
+						}else if (rbytes > 0){
+							i += rbytes;
+						}
+					}
+					i = 0;
+					break;
 			}
 			
 			// Handling volume changes during playback
@@ -194,7 +272,14 @@ int audio_thread(SceSize args, void *argp){
 			sceAudioOutOutput(ch, audiobuf);
 			
 		}
-		sceIoClose(fd);
+		switch (song.codec){
+			case OGG_VORBIS:	
+				ov_clear(&vf);
+				break;
+			default:
+				sceIoClose(fd);
+				break;
+		}
 		if (loop) sceKernelSignalSema(Audio_Mutex, 1);
 		
 	}
@@ -221,7 +306,7 @@ int sceDisplaySetFrameBuf_patched(const SceDisplayFrameBuf *pParam, int sync) {
 			if (menu_idx < 0) menu_idx++;
 		}else if ((pad.buttons & SCE_CTRL_DOWN) && (!(oldpad.buttons & SCE_CTRL_DOWN))){
 			menu_idx++;
-			if (menu_idx > 2) menu_idx--;
+			if (menu_idx > 3) menu_idx--;
 		}else if((menu_idx == 0) && (pad.buttons & SCE_CTRL_LEFT) && (!(oldpad.buttons & SCE_CTRL_LEFT))){
 			vol_bar--;
 			if (vol_bar < 0) vol_bar++;
@@ -232,7 +317,7 @@ int sceDisplaySetFrameBuf_patched(const SceDisplayFrameBuf *pParam, int sync) {
 			if (vol_bar > 10) vol_bar--;
 			volume = vol_bar * 3276;
 			vol_string[8 + vol_bar] = '*';
-		}else if(pad.buttons & SCE_CTRL_CROSS){
+		}else if((pad.buttons & SCE_CTRL_CROSS) && (!(oldpad.buttons & SCE_CTRL_CROSS))){
 			if (menu_idx == 1) loop = (loop + 1) % 2;
 			else if (menu_idx == 2){
 				sprintf(filename, DEBUG_FILE);
@@ -242,14 +327,24 @@ int sceDisplaySetFrameBuf_patched(const SceDisplayFrameBuf *pParam, int sync) {
 				menu_idx = 0;
 			}
 		}
-	}else if ((pad.buttons & SCE_CTRL_SELECT) && (pad.buttons & SCE_CTRL_LTRIGGER) && (pad.buttons & SCE_CTRL_SQUARE)) menu_mode = 1;
+	}else if ((pad.buttons & SCE_CTRL_SELECT) && (pad.buttons & SCE_CTRL_LTRIGGER) && (pad.buttons & SCE_CTRL_SQUARE)){
+		menu_mode = 1;
+	}
 	oldpad.buttons = pad.buttons;
 	
 	if (name_timer > 0){
 		setTextColor(0x00FFFFFF);
 		drawStringF(5, 5, "Now playing %s", filename);
+		#ifndef NO_DEBUG
+		drawStringF(5, 25, "Channels: %hu, Samplerate: %lu", song.audiotype+1, song.samplerate);
+		#endif
 		name_timer--;
 	}
+	
+	#ifndef NO_DEBUG
+	setTextColor(0x00FFFFFF);
+	drawStringF(5, 400, "taipool free space: %lu KBs", (taipool_get_free_space()>>10));
+	#endif
 	
 	return TAI_CONTINUE(int, refs[0], pParam, sync);
 }
@@ -264,7 +359,10 @@ int module_start(SceSize argc, const void *args) {
 	
 	// Starting a secondary thread
 	SceUID thd_id = sceKernelCreateThread("Musik_thread", audio_thread, 0x40, 0x400000, 0, 0, NULL);
-	sceKernelStartThread(thd_id, 0, NULL);
+	if (thd_id >= 0) sceKernelStartThread(thd_id, 0, NULL);
+	
+	// Initializing taipool mempool for dinamic memory managing
+	taipool_init(0x400000);
 	
 	// Hooking functions required for the config menu
 	hookFunction(0x7A410B64, sceDisplaySetFrameBuf_patched);

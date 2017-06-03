@@ -11,8 +11,8 @@ endif()
 project(Musik)
 include("${VITASDK}/share/vita.cmake" REQUIRED)
 
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,-q -Wall -O3 -std=gnu99")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -fno-rtti -fno-exceptions -HAVE_LIBSNDFILE -DHAVE_MPG123 -DWANT_FMMIDI=1 -DUSE_AUDIO_RESAMPLER -DHAVE_OGGVORBIS -DWANT_FASTWAV")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DTAIPOOL_AS_STDLIB -g -Wall -O3 -std=gnu99")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -fno-rtti -fno-exceptions")
 
 include_directories(
 )
@@ -31,6 +31,7 @@ add_executable(Musik
 )
 
 target_link_libraries(Musik
+  taipool
   taihen_stub
   SceAudio_stub_weak
   SceLibKernel_stub
@@ -38,6 +39,7 @@ target_link_libraries(Musik
   SceDisplay_stub
   SceCtrl_stub
   SceKernelThreadMgr_stub
+  vorbisidec
   k
   gcc
 )
