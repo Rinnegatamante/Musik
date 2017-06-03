@@ -203,7 +203,7 @@ int audio_thread(SceSize args, void *argp){
 				}else{
 					vorbis_info* ogg_info = ov_info(&vf,-1);
 					song.samplerate = ogg_info->rate;
-					song.audiotype = ogg_info->channels - 1;
+					song.audiotype = ogg_info->channels;
 				}
 				break;
 			default: // Unknown
@@ -336,7 +336,7 @@ int sceDisplaySetFrameBuf_patched(const SceDisplayFrameBuf *pParam, int sync) {
 		setTextColor(0x00FFFFFF);
 		drawStringF(5, 5, "Now playing %s", filename);
 		#ifndef NO_DEBUG
-		drawStringF(5, 25, "Channels: %hu, Samplerate: %lu", song.audiotype+1, song.samplerate);
+		drawStringF(5, 25, "Channels: %hu, Samplerate: %lu", song.audiotype, song.samplerate);
 		#endif
 		name_timer--;
 	}
