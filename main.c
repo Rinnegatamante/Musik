@@ -32,9 +32,10 @@ int strncasecmp(const char* s1,const char* s2, size_t n){
 
 #define DEBUG_FILE "ux0:data/audio.ogg"
 
-#define NSAMPLES  2048 // Samples per read
-#define BUFSIZE   8192 // Audiobuffer size (NSAMPLES<<2)
-#define HOOKS_NUM 1    // Hooked functions num
+#define NSAMPLES  2048    // Samples per read
+#define BUFSIZE   8192    // Audiobuffer size (NSAMPLES<<2)
+#define BUFSIZE_MONO 4096 // Dimension of audio buffer files for mono tracks
+#define HOOKS_NUM 1       // Hooked functions num
 
 static SceUID Audio_Mutex;
 static int volume = 32760, vol_bar = 10, menu_idx = 0;
@@ -158,7 +159,7 @@ int audio_thread(SceSize args, void *argp){
 				pos = 12;
 				chunk = 0x00000000;
 				sceIoLseek(fd, pos, SCE_SEEK_SET);
-				while (chunk != 0x444E5353){ // data chunk
+				while (chunk != 0x444E5353){ // SSND chunk
 					
 					if (chunk == 0x4D4D4F43){ // COMM chunk
 					
@@ -181,7 +182,7 @@ int audio_thread(SceSize args, void *argp){
 				}
 				pos += 4;
 				
-				// Positioning on data chunk start
+				// Positioning on SSND chunk start
 				sceIoLseek(fd, pos+4, SCE_SEEK_SET);
 				
 				break;
@@ -269,6 +270,7 @@ int audio_thread(SceSize args, void *argp){
 			
 			// Outputting read samples
 			sceAudioOutOutput(ch, audiobuf);
+			if (song.audiotype == 1) sceAudioOutOutput(ch, &audiobuf[BUFSIZE_MONO]);
 			
 		}
 		switch (song.codec){
@@ -336,7 +338,7 @@ int sceDisplaySetFrameBuf_patched(const SceDisplayFrameBuf *pParam, int sync) {
 		setTextColor(0x00FFFFFF);
 		drawStringF(5, 5, "Now playing %s", filename);
 		#ifndef NO_DEBUG
-		drawStringF(5, 25, "Channels: %hu, Samplerate: %lu", song.audiotype, song.samplerate);
+		drawStringF(5, 25, "Channels: %hu, Samplerate: %lu Hz", song.audiotype, song.samplerate);
 		#endif
 		name_timer--;
 	}
